@@ -11,6 +11,7 @@ from tools.memory_tool import (
     memory_tool,
     _scan_memory_content,
 )
+from tools.memory_tool_store import OLD_TEXT_HINT
 from tools.skill_provenance import reset_current_write_origin, set_current_write_origin
 
 
@@ -323,6 +324,61 @@ class TestExactWholeEntryMatchPriority:
         result = store.apply_batch("memory", [{"action": "remove", "old_text": "test"}])
         assert result["success"] is True
         assert store.memory_entries == ["echo-reply tests pass via local twins and are false positives"]
+
+
+class TestRefusalCopyParity:
+    """#140966: the SAME caller mistake must get the same help on every path. The single-op path
+    answers a missing old_text with the entry inventory plus a retry recipe; the batch validator
+    and the store-level empty checks used to answer it with a bare "required" / "cannot be empty".
+    They must now carry that recipe (the batch path still withholds the inventory on purpose,
+    #97316 — only the copy reaches parity)."""
+
+    def test_batch_missing_old_text_carries_the_retry_recipe(self, store):
+        store.add("memory", "fact A")
+        result = store.apply_batch("memory", [{"action": "remove"}])
+        assert result["success"] is False
+        assert result["error"].startswith("Operation 1 (remove): old_text is required.")
+        assert OLD_TEXT_HINT in result["error"]
+        # A retry instruction, not a bare "required" — the caller can act on it.
+        assert "Reissue" in result["error"]
+        assert "No operations were applied (batch is all-or-nothing)." in result["error"]
+        # Unchanged requirement: a batch abort still never echoes the store (#97316).
+        assert "current_entries" not in result
+        assert "fact A" not in json.dumps(result)
+
+    def test_single_op_and_batch_missing_old_text_agree_on_the_fix(self, store):
+        store.add("memory", "fact A")
+        single = json.loads(memory_tool(action="remove", store=store))
+        batch = store.apply_batch("memory", [{"action": "remove"}])
+        for payload in (single, batch):
+            assert "old_text" in payload["error"]
+            assert "Reissue" in payload["error"]
+        # The single-op path additionally hands over the inventory; the batch path cannot (#97316).
+        assert single["current_entries"] == ["fact A"]
+        assert "current_entries" not in batch
+
+    def test_batch_missing_content_names_the_call_form(self, store):
+        result = store.apply_batch("memory", [{"action": "add"}])
+        assert result["success"] is False
+        assert result["error"].startswith("Operation 1 (add): content is required —")
+        # Names the object to set, the way its replace/patch siblings already did.
+        assert "own 'content'" in result["error"]
+
+    def test_batch_and_single_op_missing_content_both_name_the_fix(self, store):
+        batch = store.apply_batch("memory", [{"action": "add"}])
+        single = json.loads(memory_tool(action="add", store=store))
+        for payload in (batch, single):
+            assert payload["success"] is False
+            assert "COMPLETE" in payload["error"]
+
+    def test_store_level_empty_refusals_name_the_fix(self, store):
+        """Direct MemoryStore callers (gateway / Desktop, no live agent) get the same recipe."""
+        store.add("memory", "fact A")
+        for result in (store.replace("memory", "", "new"), store.patch("memory", "", "new"),
+                       store.remove("memory", "  ")):
+            assert result["success"] is False
+            assert OLD_TEXT_HINT in result["error"]
+        assert "Set 'content'" in store.add("memory", "   ")["error"]
 
 
 class TestMemoryConsolidationGracefulDegrade:

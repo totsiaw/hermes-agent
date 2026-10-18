@@ -131,6 +131,14 @@ def _over_limit(new_total: int, limit: int) -> str:
 # Patch content cannot be empty, and 'remove' would drop the sibling facts in the entry.
 PATCH_DROP_HINT = "To drop text inside an entry, patch a longer span that contains it; 'remove' deletes the whole entry."
 
+# A missing old_text is recoverable: the single-op path answers it with the entry inventory PLUS the
+# recipe below (tools/memory_tool.py:_validate_single_op). The batch validator and the store-level
+# empty checks used to refuse the SAME mistake with a bare "required" / "cannot be empty", so one
+# caller error got materially different help depending on which path caught it (#140966). One shared
+# string, so the two families cannot drift apart again.
+OLD_TEXT_HINT = ("old_text is the short unique substring of the entry to change. Reissue with it set to text "
+                 "copied verbatim from the intended entry — a paraphrase will not match.")
+
 
 def _repeated_span_message(old_text: str, count: int) -> str:
     return (f"'{old_text}' appears {count} times in the matched entry, and patch edits one span. "
@@ -370,7 +378,8 @@ class MemoryStore:
         """Append a new entry. Returns error if it would exceed the char limit."""
         content = content.strip()
         if not content:
-            return _error("Content cannot be empty.", "missing_content")
+            return _error("Content cannot be empty. Set 'content' to the COMPLETE entry text to save.",
+                          "missing_content")
         if scan_error := _scan_memory_content(content):
             return _error(scan_error, "scan_blocked")
 
@@ -396,7 +405,7 @@ class MemoryStore:
         the matched span is not spliced into it."""
         new_content = new_content.strip()
         if not old_text.strip():
-            return _error("old_text cannot be empty.", "missing_old_text")
+            return _error(f"old_text cannot be empty. {OLD_TEXT_HINT}", "missing_old_text")
         if not new_content:
             return _error("new_content cannot be empty. Use 'remove' to delete entries.", "missing_content")
         if scan_error := _scan_memory_content(new_content):
@@ -410,7 +419,7 @@ class MemoryStore:
         ``replace`` deliberately is not (replace overwrites the WHOLE entry). A span that
         occurs more than once in the entry is rejected rather than edited everywhere."""
         if not (old_text or "").strip():
-            return _error("old_text cannot be empty.", "missing_old_text")
+            return _error(f"old_text cannot be empty. {OLD_TEXT_HINT}", "missing_old_text")
         if new_text is None or not str(new_text).strip():
             return _error(f"new_text cannot be empty. {PATCH_DROP_HINT}", "missing_content")
         # The span keeps its whitespace: it is part of the text being replaced ("tea " -> "coffee ").
@@ -441,7 +450,7 @@ class MemoryStore:
     def remove(self, target: str, old_text: str, matched_entry: Optional[str] = None) -> dict[str, Any]:
         """Remove the entry containing old_text substring."""
         if not old_text.strip():
-            return _error("old_text cannot be empty.", "missing_old_text")
+            return _error(f"old_text cannot be empty. {OLD_TEXT_HINT}", "missing_old_text")
         return self._edit(target, old_text.strip(), None, matched_entry)
 
     def _locate(self, entries: list[str], old_text: str, verb: str, matched_entry: Optional[str] = None):
@@ -500,14 +509,16 @@ class MemoryStore:
         """
         if act == "add":
             if not content:
-                return f"{pos}: content is required.", None, "missing_content", None
+                return (f"{pos}: content is required — set this operation object's own 'content' to the "
+                        f"COMPLETE new entry to save; a batch op never inherits the top-level "
+                        f"'content'."), None, "missing_content", None
             if content not in working:  # idempotent -- skip duplicate, don't fail the batch
                 working.append(content)
             return None, None, "none", None
         if act not in ("replace", "remove", "patch"):
             return f"{pos}: unknown action. Use add, patch, or remove.", None, "invalid_args", None
         if not old_text.strip():
-            return f"{pos}: old_text is required.", None, "missing_old_text", None
+            return f"{pos}: old_text is required. {OLD_TEXT_HINT}", None, "missing_old_text", None
         if act == "replace" and not content:
             return (f"{pos}: content is required — set this operation object's own 'content' to the COMPLETE "
                     f"new entry (or use action='remove' to delete)."), None, "missing_content", None
